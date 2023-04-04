@@ -1,0 +1,1 @@
+wget https://www.dropbox.com/s/2nh2hfy23irtrhn/isic-512.zip\?dl\=0 -O isic-512.zip
