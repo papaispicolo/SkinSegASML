@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 # coding: utf-8
-
 import comet_ml
 from comet_ml import Experiment
 import torch
@@ -28,7 +27,6 @@ from torch.optim import Adam, SGD
 import torch.nn.functional as F
 import cv2
 
-
 # from google.colab.patches import cv2_imshow
 import glob
 import matplotlib.pyplot as plt
@@ -36,171 +34,24 @@ from tqdm.notebook import tqdm
 import numpy as np
 import os
 
+#: Loss binary mode suppose you are solving binary segmentation task.
+#: That mean yor have only one class which pixels are labled as **1**,
+#: the rest pixels are background and labeled as **0**.
+#: Target mask shape - (N, H, W), model output mask shape (N, 1, H, W).
+BINARY_MODE: str = "binary"
 
+#: Loss multiclass mode suppose you are solving multi-**class** segmentation task.
+#: That mean you have *C = 1..N* classes which have unique label values,
+#: classes are mutually exclusive and all pixels are labeled with theese values.
+#: Target mask shape - (N, H, W), model output mask shape (N, C, H, W).
+MULTICLASS_MODE: str = "multiclass"
 
-class SegmentationDataset(Dataset):
-    def __init__(self, imageDir, maskDir, transforms=None, cache=False):
-        # store the image and mask filepaths, and augmentation
-        # transforms
-        self.cache = cache
-        self.imagePaths = sorted(glob.glob(imageDir + "/*"))
-        # print(self.imagePaths)
-        self.maskPaths = sorted(glob.glob(maskDir + "/*"))
-        # print(self.imagePaths)
-        self.transforms = transforms
-        if self.cache:
-            self.cache_storage = [None] * self.__len__()
-
-    def __len__(self):
-        # return the number of total samples contained in t he dataset
-        return len(self.imagePaths)
-
-    def __getitem__(self, idx):
-        # grab the image path from the current index
-        if self.cache_storage[idx] is None:
-            imagePath = self.imagePaths[idx]
-            #print(imagePath)
-            # load the image from disk, swap its channels from BGR to RGB,
-            # and read the associated mask from disk in grayscale mode
-            image = cv2.imread(imagePath)
-
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            mask = cv2.imread(self.maskPaths[idx], 0)
-            # check to see if we are applying any transformations
-            if self.transforms is not None:
-                # apply the transformations to both image and its mask
-                image = self.transforms[0](image)
-                mask = self.transforms[1](mask)
-                # return a tuple of the image and its mask
-                self.cache_storage[idx] = (image, mask)
-                return (image, mask)
-        else:
-            return self.cache_storage[idx]
-
-
-# In[9]:
-
-
-#get_ipython().system('ls -alh {data_path}')
-
-
-# In[10]:
-
-
-p = [
-    transforms.Compose([transforms.ToTensor(), transforms.Resize((572, 572))]),
-    transforms.Compose([transforms.ToTensor(), transforms.Resize((388, 388))]),
-]
-train_dataset = SegmentationDataset(
-    f"{data_path}/resized_train",
-    f"{data_path}/resized_train_gt",
-    transforms=p,
-    cache=True,
-)
-test_dataset = SegmentationDataset(
-    f"{data_path}/resized_test",
-    f"{data_path}/resized_test_gt",
-    transforms=p,
-    cache=True,
-)
-valid_dataset = SegmentationDataset(
-    f"{data_path}/resized_valid",
-    f"{data_path}/resized_valid_gt",
-    transforms=p,
-    cache=True,
-)
-
-
-# **visualizaing samples of the data**
-
-# In[11]:
-
-
-datasets = [train_dataset, test_dataset, valid_dataset]
-dataset_labels = ["train", "test", "valid"]
-
-
-# In[12]:
-
-
-# %matplotlib inline
-# %matplotlib notebook
-
-
-# In[13]:
-
-
-dataset_labels
-
-
-# In[14]:
-
-"""
-print("images\n")
-
-for k, dataset in enumerate(datasets):
-    print(dataset_labels[k] + " dataset")
-    fig = plt.figure()
-    for i in range(len(dataset)):
-        sample = dataset[i]
-        ax = plt.subplot(1, 4, i + 1)
-        plt.tight_layout()
-        ax.set_title("Sample #{}".format(i))
-        ax.axis("off")
-        plt.imshow(sample[0].permute(1, 2, 0))
-        if i == 3:
-            plt.show()
-            break
-
-print("\nTheir ground truth\n")
-
-for k, dataset in enumerate(datasets):
-    print(dataset_labels[k] + " dataset")
-    fig = plt.figure()
-    for i in range(len(dataset)):
-        sample = dataset[i]
-        ax = plt.subplot(1, 4, i + 1)
-        plt.tight_layout()
-        ax.set_title("Sample #{}".format(i))
-        ax.axis("off")
-        plt.imshow(sample[1][0], cmap="gray")
-        if i == 3:
-            plt.show()
-            break
-"""
-
-# **creating data loaders**
-
-# In[15]:
-
-
-batch_size = 2 #2
-
-
-# In[16]:
-
-
-train_dataloader = DataLoader(
-    train_dataset, batch_size=batch_size, shuffle=False, pin_memory=True
-)
-test_dataloader = DataLoader(
-    test_dataset, batch_size=batch_size, shuffle=False, pin_memory=True
-)
-valid_dataloader = DataLoader(
-    valid_dataset, batch_size=batch_size, shuffle=False, pin_memory=True
-)
-
-
-# In[17]:
-
-
-#get_ipython().system('nvidia-smi')
-
-
-# ## defining the network
-
-# In[18]:
-
+#: Loss multilabel mode suppose you are solving multi-**label** segmentation task.
+#: That mean you have *C = 1..N* classes which pixels are labeled as **1**,
+#: classes are not mutually exclusive and each class have its own *channel*,
+#: pixels in each channel which are not belong to class labeled as **0**.
+#: Target mask shape - (N, C, H, W), model output mask shape (N, C, H, W).
+MULTILABEL_MODE: str = "multilabel"
 
 class Unet(Module):
     def __init__(self):
@@ -333,10 +184,7 @@ class Unet(Module):
             bypass = F.pad(bypass, (-c, -c, -c, -c))
         return torch.cat((upsampled, bypass), 1)
 
-
-# In[19]:
-
-
+    
 class IoULoss(Module):
     def __init__(self, weight=None, size_average=True):
         super(IoULoss, self).__init__()
@@ -365,34 +213,8 @@ class IoULoss(Module):
         IoU = (intersection + smooth) / (union + smooth)
 
         return 1 - IoU
-
-
-# In[20]:
-
-
-#: Loss binary mode suppose you are solving binary segmentation task.
-#: That mean yor have only one class which pixels are labled as **1**,
-#: the rest pixels are background and labeled as **0**.
-#: Target mask shape - (N, H, W), model output mask shape (N, 1, H, W).
-BINARY_MODE: str = "binary"
-
-#: Loss multiclass mode suppose you are solving multi-**class** segmentation task.
-#: That mean you have *C = 1..N* classes which have unique label values,
-#: classes are mutually exclusive and all pixels are labeled with theese values.
-#: Target mask shape - (N, H, W), model output mask shape (N, C, H, W).
-MULTICLASS_MODE: str = "multiclass"
-
-#: Loss multilabel mode suppose you are solving multi-**label** segmentation task.
-#: That mean you have *C = 1..N* classes which pixels are labeled as **1**,
-#: classes are not mutually exclusive and each class have its own *channel*,
-#: pixels in each channel which are not belong to class labeled as **0**.
-#: Target mask shape - (N, C, H, W), model output mask shape (N, C, H, W).
-MULTILABEL_MODE: str = "multilabel"
-
-
-# In[21]:
-
-
+    
+    
 def soft_jaccard_score(
     output: torch.Tensor,
     target: torch.Tensor,
@@ -413,9 +235,6 @@ def soft_jaccard_score(
     return jaccard_score
 
 
-# In[22]:
-
-
 def to_tensor(x, dtype=None) -> torch.Tensor:
     if isinstance(x, torch.Tensor):
         if dtype is not None:
@@ -432,11 +251,8 @@ def to_tensor(x, dtype=None) -> torch.Tensor:
         if dtype is not None:
             x = x.type(dtype)
         return x
-
-
-# In[23]:
-
-
+    
+    
 from typing import Optional, List
 
 import torch
@@ -544,10 +360,7 @@ class JaccardLoss(_Loss):
             loss = loss[self.classes]
 
         return loss.mean()
-
-
-# In[24]:
-
+    
 
 from sklearn.metrics import confusion_matrix
 import numpy as np
@@ -567,9 +380,6 @@ def compute_iou(y_pred, y_true):
     return np.mean(IoU)
 
 
-# In[25]:
-
-
 def iou_per_volume(validation_pred, validation_true, patient_slice_index):
     iou_list = []
     num_slices = np.bincount([p[0] for p in patient_slice_index])
@@ -583,228 +393,41 @@ def iou_per_volume(validation_pred, validation_true, patient_slice_index):
     return iou_list
 
 
-# In[26]:
-
-
-checkpoints_path = "/content/gdrive/MyDrive/data/unet_isic_checkpoints/"
-
-
-# In[27]:
-
-
-hyper_params = {
-    "input_size": 572,
-    "num_layers": 2,
-    "num_classes": 1,
-    "batch_size": 8,
-    "num_epochs": 111,
-    "learning_rate": 0.00001
-}
-
-"""
-hyper_params = {
-    "input_size": 572,
-    "num_layers": 2,
-    "num_classes": 1,
-    "batch_size": 1,
-    "num_epochs": 1,
-    "learning_rate": 0.00001
-}
-"""
-
-experiment = Experiment(
-    api_key="uespiI7sf0P5L5g2ja4vTFz25",
-    project_name="unet-isic",
-    workspace="omarkhaled99",
-)
-
-torch.cuda.empty_cache()
-# experiment = Experiment(project_name="unet-isic-pytorch")
-experiment.log_parameters(hyper_params)
-
-lr = hyper_params["learning_rate"]
-epochs = hyper_params["num_epochs"]
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-unet = Unet()
-unet.to(device)
-iou_loss = JaccardLoss(BINARY_MODE)
-best_validation_iou = 0.0
-optimizer = Adam(unet.parameters(), lr=lr)
-
-loss_train = []
-loss_valid = []
-
-loaders = {"train": train_dataloader, "valid": valid_dataloader}
-validation_iou = []
-train_iou =  []
-step = 0
-
-
-########################################################################################
-## Loading the model
-########################################################################################
-
-resume_training = True
-start_epoch = 0
-
-if resume_training :
-    #epoch_to_load = 6
-    epoch_to_load = 99
-    checkpoint_data_path = f'{checkpoints_path}/unet-epoch-train-{epoch_to_load}.pt'
-    print("loading checkpoint...")
-    print(checkpoint_data_path)
+def evaluate_segmentation_result(unet, device, data_point):
+    out = unet(data_point[0].to(device).unsqueeze(0)).detach().cpu()
+    fig = plt.figure()
+    ax = plt.subplot(1,3,1)
+    plt.tight_layout()
+    ax.set_title("Input Image")
+    plt.imshow(data_point[0].permute(1, 2, 0))
+    ax = plt.subplot(1,3,2)
+    ax.set_title("Prediction")
+    plt.imshow(out[0][0] >= 0.5)
+    ax = plt.subplot(1,3,3)
+    ax.set_title("Ground Truth")
+    plt.imshow(data_point[1][0])
+    plt.show()
+    print("IoU ( Intersection over Union )")
+    print(compute_iou(data_point[1][0] >= 0.5, out[0][0] >= 0.5))
     
-    checkpoint = torch.load(checkpoint_data_path)
-    unet.load_state_dict(checkpoint['model_state_dict'])
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    start_epoch = checkpoint['epoch'] + 1
-    loss_train = checkpoint['loss']
+    
+def compute_total_loss(unet, device, iou_loss, test_dataloader):
+    test_losses = []
+    test_loss = 0.0
+    test_ious = []
+    test_iou = 0.0
+    for i, data in enumerate(test_dataloader):
+        x, y_true = data
+        x, y_true = x.to(device), y_true.to(device)
 
-#get_ipython().system('nvidia-smi')
-for epoch in tqdm(range(start_epoch, epochs), total=epochs):
-    for phase in ["train", "valid"]:
-        if phase == "train":
-            unet.train()
-        else:
-            unet.eval()
+        with torch.no_grad():
+            y_pred = unet(x)
+            loss = iou_loss(y_pred, y_true)
+            test_losses.append(loss.item())
+            test_ious.append(compute_iou(y_pred.cpu() >= 0.5, y_true.cpu() >= 0.5))
 
-        validation_pred = []
-        validation_true = []
-
-        for i, data in enumerate(loaders[phase]):
-            if phase == "train":
-                step += 1
-            x, y_true = data
-            print(x.shape,y_true.shape)
-
-            x, y_true = x.to(device), y_true.to(device)
-       
-            optimizer.zero_grad()
-
-            with torch.set_grad_enabled(phase == "train"):
-                # if phase == "valid":
-                #   torch.no_grad() 
-                y_pred = unet(x)
-                loss = iou_loss(y_pred, y_true)
-
-                if phase == "valid":
-                    loss_valid.append(loss.item())
-                    validation_iou.append(compute_iou(y_pred.cpu()>=0.5,y_true.cpu()>=0.5))
-                    experiment.log_image(image_data= y_pred.detach().cpu()[0][0],name = str(epoch)+"_"+str(i))
-                    experiment.log_image(image_data= y_true.detach().cpu()[0][0],name = str(epoch)+"_"+str(i))
-                    # print(validation_iou)
-                if phase == "train":
-                    loss_train.append(loss.item())
-                    experiment.log_metric("train_loss",loss.item(), step=step, epoch=epoch)
-                    train_iou.append(compute_iou(y_pred.cpu()>=0.5,y_true.cpu()>=0.5))
-                    loss.backward()
-                    optimizer.step()
-
-            if phase == "train" and (step) % 10 == 0:
-                print('training loss for step {} is {}'.format(step,loss_train[-1]))
-                print('training iou for step {} is {}'.format(step,train_iou[-1]))
-                torch.save({
-                    'epoch': epoch,
-                    'model_state_dict': unet.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'loss': loss_train,
-                    }, os.path.join(checkpoints_path, "unet-epoch-train-"+str(epoch)+".pt"))
-                loss_train = []
-                
-
-        if phase == "valid":
-            print('valid loss for epoch {} is {}'.format(epoch,np.mean(loss_valid)))
-            experiment.log_metric("val_loss",np.mean(loss_valid), step=step, epoch=epoch)
-
-            mean_iou = np.mean(validation_iou)
-            print('val_iou {} for epoch {}'.format(mean_iou, epoch))
-            experiment.log_metric("valid_iou",mean_iou, epoch=epoch)
-            experiment.log_metric("train_iou",np.mean(train_iou), epoch=epoch)
-            validation_iou = []
-            train_iou =  []
-            if (mean_iou > best_validation_iou) or (epoch%10 == 0):
-                best_validation_iou = mean_iou
-                torch.save(unet.state_dict(), os.path.join(checkpoints_path, "unet-epoch-"+str(epoch)+".pt"))
-            loss_valid = []
-
-print("Best validation mean IOU: {:4f}".format(best_validation_iou))
-experiment.end()
-
-"""
-# In[ ]:
-
-
-torch.save(
-    unet.state_dict(),
-    os.path.join(checkpoints_path, "unet-epoch-19-jaccard-loss-class.pt"),
-)
-
-
-# In[ ]:
-
-
-experiment.end()
-
-
-# In[ ]:
-
-
-out = unet(test_dataset[58][0].to(device).unsqueeze(0)).detach().cpu()
-
-
-# In[ ]:
-
-
-plt.imshow(test_dataset[58][0].permute(1, 2, 0))
-
-
-# In[ ]:
-
-
-plt.imshow(test_dataset[58][1][0])
-
-
-# In[ ]:
-
-
-plt.imshow(out[0][0] >= 0.5)
-
-
-# In[ ]:
-
-
-compute_iou(test_dataset[10][1][0] >= 0.5, out[0][0] >= 0.5)
-
-
-# In[ ]:
-
-"""
-test_losses = []
-test_loss = 0.0
-test_ious = []
-test_iou = 0.0
-for i, data in enumerate(test_dataloader):
-    x, y_true = data
-    x, y_true = x.to(device), y_true.to(device)
-
-    with torch.no_grad():
-        y_pred = unet(x)
-        loss = iou_loss(y_pred, y_true)
-        test_losses.append(loss.item())
-        test_ious.append(compute_iou(y_pred.cpu() >= 0.5, y_true.cpu() >= 0.5))
-
-test_loss = np.mean(test_losses)
-test_iou = np.mean(test_ious)
-print("total test loss : ", test_loss)
-print("total test_iou : ", test_iou)
-
-"""
-
-# In[ ]:
-"""
-
-print ("done..")
-
-
+    test_loss = np.mean(test_losses)
+    test_iou = np.mean(test_ious)
+    print("test loss : ", test_loss)
+    print("test iou : ", test_iou)
+    
